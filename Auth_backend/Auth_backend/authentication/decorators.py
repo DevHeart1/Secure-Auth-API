@@ -1,68 +1,57 @@
-import time
 from functools import wraps
-from django.conf import settings
-from django.core.cache import cache
+from django_ratelimit.decorators import ratelimit as django_ratelimit
 from rest_framework.response import Response
 from rest_framework import status
-import logging
+from django.conf import settings
 
-# Configure logger
-logger = logging.getLogger('authentication.security')
-
-def rate_limit(key_prefix, limit=5, period=60, limit_response=None):
+def login_ratelimit(view_func):
     """
-    Rate limiting decorator for views
-    
-    Args:
-        key_prefix (str): Prefix for the cache key
-        limit (int): Maximum number of requests allowed in the period
-        period (int): Time period in seconds
-        limit_response: Response to return when rate limit is exceeded
+    Rate limit decorator specifically for login attempts.
+    Limits based on username + IP to prevent username enumeration attacks.
     """
-    def decorator(view_func):
-        @wraps(view_func)
-        def _wrapped_view(request, *args, **kwargs):
-            # Get client IP
-            ip_address = get_client_ip(request)
-            
-            # Create cache key based on IP and endpoint
-            cache_key = f"{key_prefix}:{ip_address}"
-            
-            # Get current request count for this key
-            requests = cache.get(cache_key, [])
-            
-            # Filter out requests older than the specified period
-            current_time = time.time()
-            requests = [req_time for req_time in requests if current_time - req_time < period]
-            
-            # Check if rate limit is exceeded
-            if len(requests) >= limit:
-                logger.warning(f"Rate limit exceeded for {cache_key}")
-                
-                # Use custom response if provided, otherwise return default
-                if limit_response:
-                    return limit_response
-                return Response(
-                    {"error": "Rate limit exceeded. Please try again later."},
-                    status=status.HTTP_429_TOO_MANY_REQUESTS
-                )
-            
-            # Add current request timestamp and update cache
-            requests.append(current_time)
-            cache.set(cache_key, requests, period * 2)  # Set cache expiry to twice the period
-            
-            # Call the original view function
-            return view_func(request, *args, **kwargs)
-        
-        return _wrapped_view
-    
-    return decorator
+    @wraps(view_func)
+    @django_ratelimit(key='post:email', rate=getattr(settings, 'RATELIMIT_LOGIN', '5/m'), 
+                    method=['POST'], block=True)
+    @django_ratelimit(key='ip', rate=getattr(settings, 'RATELIMIT_LOGIN_IP', '10/m'), 
+                    method=['POST'], block=True)
+    def wrapped(request, *args, **kwargs):
+        return view_func(request, *args, **kwargs)
+    return wrapped
 
-def get_client_ip(request):
-    """Get client IP address from request headers"""
-    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-    if x_forwarded_for:
-        ip = x_forwarded_for.split(',')[0]
-    else:
-        ip = request.META.get('REMOTE_ADDR')
-    return ip
+def register_ratelimit(view_func):
+    """
+    Rate limit decorator for registration attempts.
+    """
+    @wraps(view_func)
+    @django_ratelimit(key='ip', rate=getattr(settings, 'RATELIMIT_SIGNUP', '3/h'), 
+                    method=['POST'], block=True)
+    def wrapped(request, *args, **kwargs):
+        return view_func(request, *args, **kwargs)
+    return wrapped
+
+def password_reset_ratelimit(view_func):
+    """
+    Rate limit decorator for password reset attempts.
+    """
+    @wraps(view_func)
+    @django_ratelimit(key='post:email', rate=getattr(settings, 'RATELIMIT_PASSWORD_RESET', '3/h'), 
+                    method=['POST'], block=True)
+    @django_ratelimit(key='ip', rate=getattr(settings, 'RATELIMIT_PASSWORD_RESET_IP', '5/h'), 
+                    method=['POST'], block=True)
+    def wrapped(request, *args, **kwargs):
+        return view_func(request, *args, **kwargs)
+    return wrapped
+
+def ratelimit_handler(func):
+    """
+    Custom handler for rate limited requests.
+    """
+    @wraps(func)
+    def wrapped(self, request, *args, **kwargs):
+        if getattr(request, 'limited', False):
+            return Response(
+                {"error": "Too many attempts. Please try again later."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+        return func(self, request, *args, **kwargs)
+    return wrapped

@@ -1,48 +1,70 @@
- #!/bin/bash
+#!/bin/bash
 
-set -e
-
-# Function to wait for PostgreSQL to be ready
-function postgres_ready() {
+# Function to check if database is ready
+function postgres_ready(){
 python << END
 import sys
 import psycopg2
 import os
 
 try:
+    dbname = os.environ.get("DB_NAME", "secure_auth_db")
+    user = os.environ.get("DB_USER", "postgres")
+    password = os.environ.get("DB_PASSWORD", "")
+    host = os.environ.get("DB_HOST", "localhost")
+    port = os.environ.get("DB_PORT", "5432")
+    
     conn = psycopg2.connect(
-        dbname=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT", "5432"),
+        dbname=dbname,
+        user=user,
+        password=password,
+        host=host,
+        port=port
     )
 except psycopg2.OperationalError:
-    sys.exit(1)
+    sys.exit(-1)
 sys.exit(0)
 END
 }
 
-# Wait for PostgreSQL
-until postgres_ready; do
+# Wait for PostgreSQL to be ready
+if [ "$USE_POSTGRES" = "True" ]; then
     echo "Waiting for PostgreSQL..."
-    sleep 2
-done
-echo "PostgreSQL is ready!"
+    until postgres_ready; do
+        echo "PostgreSQL unavailable, waiting..."
+        sleep 2
+    done
+    echo "PostgreSQL ready!"
+fi
 
-# Apply database migrations
-echo "Applying database migrations..."
+# Change to Django project directory
 cd Auth_backend
-python manage.py migrate
 
 # Collect static files
 echo "Collecting static files..."
 python manage.py collectstatic --noinput
 
-# Create superuser if not exists (only in development)
-if [[ "$DJANGO_SETTINGS_MODULE" != *prod* ]]; then
-    echo "Creating superuser if not exists..."
-    python manage.py createsuperuser --noinput || true
+# Apply database migrations
+echo "Applying database migrations..."
+python manage.py migrate --noinput
+
+# Create superuser if specified in environment variables
+if [ -n "$DJANGO_SUPERUSER_EMAIL" ] && [ -n "$DJANGO_SUPERUSER_PASSWORD" ]; then
+    echo "Creating superuser..."
+    python manage.py createsuperuser --noinput || echo "Superuser already exists"
 fi
 
+# Start Celery worker in the background if CELERY_WORKER=True
+if [ "$CELERY_WORKER" = "True" ]; then
+    echo "Starting Celery worker..."
+    celery -A secure_auth worker --loglevel=info &
+fi
+
+# Start Celery beat in the background if CELERY_BEAT=True
+if [ "$CELERY_BEAT" = "True" ]; then
+    echo "Starting Celery beat..."
+    celery -A secure_auth beat --loglevel=info &
+fi
+
+echo "Starting Django application..."
 exec "$@"
