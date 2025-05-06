@@ -1,0 +1,142 @@
+name: Secure Auth API CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        cd Auth_backend
+        pip install -r requirements.txt
+        
+    - name: Run linting
+      run: |
+        cd Auth_backend
+        pip install flake8
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        
+    - name: Run tests
+      env:
+        USE_POSTGRES: 'True'
+        DB_NAME: test_db
+        DB_USER: postgres
+        DB_PASSWORD: postgres
+        DB_HOST: localhost
+        DB_PORT: 5432
+        REDIS_URL: redis://localhost:6379/1
+        SECRET_KEY: test-secret-key-for-ci-pipeline
+        DJANGO_SETTINGS_MODULE: secure_auth.settings
+      run: |
+        cd Auth_backend/Auth_backend
+        pytest -v --cov=authentication --cov-report=xml
+        
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./Auth_backend/Auth_backend/coverage.xml
+        fail_ci_if_error: false
+
+  build:
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+      
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+        
+    - name: Build and push
+      uses: docker/build-push-action@v3
+      with:
+        context: ./Auth_backend
+        push: true
+        tags: ${{ secrets.DOCKERHUB_USERNAME }}/secure-auth-api:${{ github.sha }}
+        cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/secure-auth-api:latest
+        cache-to: type=inline
+        
+    - name: Tag as latest for main branch
+      if: github.ref == 'refs/heads/main'
+      uses: docker/build-push-action@v3
+      with:
+        context: ./Auth_backend
+        push: true
+        tags: ${{ secrets.DOCKERHUB_USERNAME }}/secure-auth-api:latest
+
+  deploy-staging:
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Deploy to staging
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.STAGING_HOST }}
+        username: ${{ secrets.STAGING_USERNAME }}
+        key: ${{ secrets.STAGING_SSH_KEY }}
+        script: |
+          cd ~/secure-auth-api
+          docker-compose pull
+          docker-compose up -d
+
+  deploy-production:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+    - name: Deploy to production
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.PRODUCTION_HOST }}
+        username: ${{ secrets.PRODUCTION_USERNAME }}
+        key: ${{ secrets.PRODUCTION_SSH_KEY }}
+        script: |
+          cd ~/secure-auth-api
+          docker-compose pull
+          docker-compose up -d

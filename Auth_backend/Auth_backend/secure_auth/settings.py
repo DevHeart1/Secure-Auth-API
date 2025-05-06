@@ -142,6 +142,17 @@ REST_FRAMEWORK = {
     'DEFAULT_RENDERER_CLASSES': (
         'rest_framework.renderers.JSONRenderer',
     ),
+    # Add custom exception handler
+    'EXCEPTION_HANDLER': 'authentication.exception_handlers.custom_exception_handler',
+    # Add throttling
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '60/hour',
+        'user': '1000/day',
+    },
 }
 
 # JWT Settings
