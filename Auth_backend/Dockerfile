@@ -1,35 +1,44 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 # Set environment variables
-ENV PYTHONUNBUFFERED 1
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV DJANGO_SETTINGS_MODULE secure_auth.settings_prod
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV DJANGO_SETTINGS_MODULE=secure_auth.settings_prod
 
-# Create app directory
+# Set work directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        gcc \
-        postgresql-client \
-        gettext \
+# Install dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    postgresql-client \
+    netcat-openbsd \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Copy requirements file
 COPY requirements.txt /app/
-RUN pip install --upgrade pip \
-    && pip install -r requirements.txt \
-    && pip install gunicorn
+
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy project
 COPY . /app/
 
-# Run as non-root user
-RUN useradd -m appuser
-RUN chown -R appuser:appuser /app
+# Create a non-root user and switch to it
+RUN adduser --disabled-password --gecos '' appuser && \
+    chown -R appuser:appuser /app
 USER appuser
 
+# Add entrypoint script
+COPY ./entrypoint.sh /app/
+RUN chmod +x /app/entrypoint.sh
+
+# Run entrypoint script
+ENTRYPOINT ["/app/entrypoint.sh"]
+
+# Expose port for gunicorn
+EXPOSE 8000
+
 # Run gunicorn
-CMD gunicorn secure_auth.wsgi:application --bind 0.0.0.0:8000 --workers 3
+CMD ["gunicorn", "Auth_backend.secure_auth.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
