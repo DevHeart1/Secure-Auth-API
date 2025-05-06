@@ -11,58 +11,71 @@ from rest_framework.exceptions import (
     PermissionDenied as DRFPermissionDenied,
     Throttled,
 )
+from rest_framework.response import Response
+import traceback
 
 logger = logging.getLogger('authentication.security')
 
 def custom_exception_handler(exc, context):
     """
-    Custom exception handler for consistent API error responses.
+    Custom exception handler for DRF that provides consistent error responses
+    with additional logging for security-related exceptions.
     """
     # Call REST framework's default exception handler first
     response = exception_handler(exc, context)
-
-    if response is not None:
-        data = {'error': str(exc)}
+    
+    if response is None:
+        # If DRF couldn't handle it, log it and return a generic 500
+        logger.error(f"Unhandled exception: {exc.__class__.__name__}: {str(exc)}\n{traceback.format_exc()}")
+        return Response(
+            {"error": "An unexpected error occurred.", "code": "server_error"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+    
+    # Add more context to the response
+    error_data = {"error": str(exc)}
+    
+    # Add error code based on exception type
+    if isinstance(exc, ValidationError):
+        error_data["code"] = "validation_error"
+        error_data["details"] = response.data
         
-        # Add error detail for validation errors
-        if isinstance(exc, ValidationError):
-            data = {'error': 'Validation error', 'details': exc.detail}
-            
-        # Add request info for logging
-        request = context.get('request')
-        if request:
-            # Log security-related exceptions
-            if isinstance(exc, (AuthenticationFailed, NotAuthenticated, DRFPermissionDenied, Throttled)):
-                log_data = {
-                    'path': request.path,
-                    'method': request.method,
-                    'user': request.user.email if hasattr(request.user, 'email') else 'anonymous',
-                    'ip': _get_client_ip(request),
-                    'error_type': exc.__class__.__name__,
-                    'error_detail': str(exc),
-                }
-                logger.warning(f"Security exception: {log_data}")
+    elif isinstance(exc, AuthenticationFailed):
+        error_data["code"] = "authentication_failed"
+        # Log potential security incidents
+        _log_security_event(exc, context)
         
-        # Replace response data with our custom format
-        response.data = data
-            
+    elif hasattr(exc, 'default_code'):
+        error_data["code"] = exc.default_code
+        
+        # Log security-related exceptions
+        if exc.default_code in ['permission_denied', 'not_authenticated', 'authentication_failed']:
+            _log_security_event(exc, context)
     else:
-        # Handle Django and other exceptions
-        if isinstance(exc, Http404):
-            data = {'error': 'Resource not found'}
-            response = Response(data, status=status.HTTP_404_NOT_FOUND)
-            
-        elif isinstance(exc, PermissionDenied):
-            data = {'error': 'Permission denied'}
-            response = Response(data, status=status.HTTP_403_FORBIDDEN)
-            
-        elif isinstance(exc, Exception):
-            # Log unexpected errors
-            logger.exception('Unexpected error')
-            data = {'error': 'Internal server error'}
-            response = Response(data, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+        error_data["code"] = "api_error"
+    
+    # Replace the response data with our formatted data
+    response.data = error_data
+    
     return response
+
+def _log_security_event(exc, context):
+    """Log security-related exceptions with detailed context"""
+    request = context['request']
+    user = request.user
+    
+    log_data = {
+        'exception': exc.__class__.__name__,
+        'message': str(exc),
+        'view': context['view'].__class__.__name__,
+        'path': request.path,
+        'method': request.method,
+        'user': user.email if hasattr(user, 'email') and user.email else 'anonymous',
+        'ip': _get_client_ip(request),
+        'user_agent': request.META.get('HTTP_USER_AGENT', 'unknown'),
+    }
+    
+    logger.warning(f"Security event detected: {log_data}")
 
 def _get_client_ip(request):
     """Extract client IP from request"""

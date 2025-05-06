@@ -1,108 +1,160 @@
 version: '3.8'
 
 services:
-  # Web API service
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+  web:
+    build: .
     restart: always
     volumes:
-      - static_files:/app/Auth_backend/staticfiles
-      - media_files:/app/Auth_backend/media
-      - logs:/app/Auth_backend/logs
+      - static_volume:/app/Auth_backend/staticfiles
+      - media_volume:/app/Auth_backend/media
+      - logs_volume:/app/Auth_backend/logs
     env_file:
-      - .env
-    depends_on:
-      - postgres
-      - redis
-    networks:
-      - app_network
-
-  # Celery worker for async tasks
-  celery_worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: celery -A Auth_backend.secure_auth worker -l info
-    volumes:
-      - logs:/app/Auth_backend/logs
-    env_file:
-      - .env
-    depends_on:
-      - api
-      - redis
-      - postgres
-    networks:
-      - app_network
-
-  # Celery beat for scheduled tasks
-  celery_beat:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: celery -A Auth_backend.secure_auth beat -l info
-    volumes:
-      - logs:/app/Auth_backend/logs
-    env_file:
-      - .env
-    depends_on:
-      - api
-      - redis
-      - postgres
-    networks:
-      - app_network
-
-  # Postgres database service
-  postgres:
-    image: postgres:14.0-alpine
-    restart: always
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    env_file:
-      - .env
+      - ./.env
     environment:
-      - POSTGRES_PASSWORD=${DB_PASSWORD}
-      - POSTGRES_USER=${DB_USER}
-      - POSTGRES_DB=${DB_NAME}
+      - USE_POSTGRES=True
+      - DJANGO_SETTINGS_MODULE=secure_auth.settings_prod
+    depends_on:
+      - postgres
+      - redis
     networks:
-      - app_network
+      - secure_auth_network
 
-  # Redis service for cache and message broker
+  celery_worker:
+    build: .
+    restart: always
+    command: celery -A secure_auth worker --loglevel=info
+    volumes:
+      - logs_volume:/app/Auth_backend/logs
+    env_file:
+      - ./.env
+    environment:
+      - USE_POSTGRES=True
+      - DJANGO_SETTINGS_MODULE=secure_auth.settings_prod
+      - CELERY_WORKER=True
+    depends_on:
+      - web
+      - redis
+      - postgres
+    networks:
+      - secure_auth_network
+
+  celery_beat:
+    build: .
+    restart: always
+    command: celery -A secure_auth beat --loglevel=info
+    volumes:
+      - logs_volume:/app/Auth_backend/logs
+    env_file:
+      - ./.env
+    environment:
+      - USE_POSTGRES=True
+      - DJANGO_SETTINGS_MODULE=secure_auth.settings_prod
+      - CELERY_BEAT=True
+    depends_on:
+      - web
+      - redis
+      - postgres
+    networks:
+      - secure_auth_network
+
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    env_file:
+      - ./.env
+    environment:
+      - POSTGRES_DB=${DB_NAME:-secure_auth_db}
+      - POSTGRES_USER=${DB_USER:-secure_auth_user}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-secure-database-password}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-secure_auth_user} -d ${DB_NAME:-secure_auth_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - secure_auth_network
+
   redis:
-    image: redis:7.0-alpine
+    image: redis:7-alpine
     restart: always
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
-      - app_network
+      - secure_auth_network
 
-  # Nginx service for serving static files and reverse proxy
   nginx:
-    image: nginx:1.23-alpine
+    image: nginx:1.25-alpine
     restart: always
+    volumes:
+      - ./nginx/secure_auth.conf:/etc/nginx/conf.d/default.conf
+      - static_volume:/app/static
+      - media_volume:/app/media
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
     ports:
       - "80:80"
       - "443:443"
-    volumes:
-      - ./nginx/secure_auth.conf:/etc/nginx/conf.d/default.conf
-      - ./nginx/ssl:/etc/nginx/ssl
-      - static_files:/var/www/static
-      - media_files:/var/www/media
     depends_on:
-      - api
+      - web
     networks:
-      - app_network
+      - secure_auth_network
+    command: "/bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g \"daemon off;\"'"
 
-# Networks
-networks:
-  app_network:
-    driver: bridge
+  certbot:
+    image: certbot/certbot
+    restart: always
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    networks:
+      - secure_auth_network
 
-# Volumes
+  prometheus:
+    image: prom/prometheus
+    restart: always
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    networks:
+      - secure_auth_network
+
+  grafana:
+    image: grafana/grafana
+    restart: always
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - secure_auth_network
+
 volumes:
   postgres_data:
   redis_data:
-  static_files:
-  media_files:
-  logs:
+  static_volume:
+  media_volume:
+  logs_volume:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  secure_auth_network:
+    driver: bridge
