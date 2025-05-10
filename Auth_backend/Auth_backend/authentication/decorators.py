@@ -23,241 +23,295 @@ def get_client_ip(request):
         ip = request.META.get('REMOTE_ADDR')
     return ip
 
-def rate_limit(key_func, rate_limit_count, time_period):
+def rate_limit(key_prefix, limit=5, period=60, scope='ip'):
     """
-    Custom rate limiter decorator that limits the number of requests 
-    a user can make within a time period based on a dynamic key.
+    Rate limiting decorator that can be applied to views or methods.
     
     Args:
-        key_func: Function that returns the rate limiting key (e.g. IP or user ID)
-        rate_limit_count: Max number of requests allowed
-        time_period: Time period in seconds
+        key_prefix (str): Prefix for the rate limit key (e.g., 'login', 'register')
+        limit (int): Maximum number of requests allowed in the period
+        period (int): Time period in seconds
+        scope (str): Scope of the rate limit ('ip', 'user', 'global')
+    
+    Usage:
+        @rate_limit('login', limit=5, period=60)
+        def login_view(request):
+            ...
     """
     def decorator(view_func):
         @functools.wraps(view_func)
         def wrapped_view(request, *args, **kwargs):
-            # Get the rate limiting key
-            cache_key = key_func(request)
-            
-            # Get current count from cache
-            current_count = cache.get(cache_key, 0)
-            
-            if current_count >= rate_limit_count:
-                logger.warning(f"Rate limit exceeded for {cache_key}")
-                
-                # Check if it's a DRF request or Django request
-                if hasattr(request, '_request'):
-                    # DRF Request object
-                    return Response(
-                        {"error": "Rate limit exceeded. Please try again later.", "code": "rate_limit_exceeded"},
-                        status=status.HTTP_429_TOO_MANY_REQUESTS
-                    )
+            # Generate the cache key based on scope
+            if scope == 'ip':
+                # Use IP address for rate limiting
+                client_ip = _get_client_ip(request)
+                key = f"ratelimit:{key_prefix}:{client_ip}"
+            elif scope == 'user' and hasattr(request, 'user') and request.user.is_authenticated:
+                # Use user ID for rate limiting
+                key = f"ratelimit:{key_prefix}:user_{request.user.id}"
+            elif scope == 'user_or_ip':
+                # Use user ID if authenticated, otherwise IP
+                if hasattr(request, 'user') and request.user.is_authenticated:
+                    key = f"ratelimit:{key_prefix}:user_{request.user.id}"
                 else:
-                    # Django HttpRequest
-                    return HttpResponse(
-                        "Rate limit exceeded. Please try again later.",
-                        status=429
-                    )
+                    client_ip = _get_client_ip(request)
+                    key = f"ratelimit:{key_prefix}:{client_ip}"
+            elif scope == 'param' and 'param_name' in kwargs:
+                # Use a specific request parameter
+                param_value = kwargs.get('param_name')
+                key = f"ratelimit:{key_prefix}:{param_value}"
+            else:
+                # Global rate limit
+                key = f"ratelimit:{key_prefix}:global"
+            
+            # Get the current count and timestamp from cache
+            cache_data = cache.get(key, {'count': 0, 'reset': time.time() + period})
+            
+            # Check if the period has expired and reset if needed
+            if time.time() > cache_data['reset']:
+                cache_data = {'count': 0, 'reset': time.time() + period}
             
             # Increment the count
-            if current_count == 0:
-                # First request in this period
-                cache.set(cache_key, 1, time_period)
-            else:
-                # Increment existing count
-                cache.incr(cache_key)
+            cache_data['count'] += 1
+            
+            # Store back in cache with expiry set to the reset time
+            ttl = int(cache_data['reset'] - time.time())
+            cache.set(key, cache_data, ttl)
+            
+            # Check if rate limit exceeded
+            if cache_data['count'] > limit:
+                # Log rate limit breach
+                logger.warning(
+                    f"Rate limit exceeded: {key_prefix} by {scope}={key.split(':')[-1]}",
+                    extra={
+                        'key_prefix': key_prefix,
+                        'scope': scope,
+                        'limit': limit,
+                        'period': period,
+                        'count': cache_data['count'],
+                        'client_ip': _get_client_ip(request),
+                        'user_agent': request.META.get('HTTP_USER_AGENT', 'unknown'),
+                    }
+                )
                 
-            # Process the request
+                # Calculate retry-after time
+                retry_after = int(cache_data['reset'] - time.time())
+                
+                # Raise throttled exception
+                raise Throttled(
+                    detail=f"Request rate limit exceeded. Try again in {retry_after} seconds.",
+                    code='throttled'
+                )
+            
+            # Execute the view function
             return view_func(request, *args, **kwargs)
         
         return wrapped_view
     
     return decorator
 
-def login_ratelimit(view_func):
-    """Rate limit for login attempts - 5 per minute per IP"""
-    @functools.wraps(view_func)
-    def wrapped_view(request, *args, **kwargs):
-        ip = get_client_ip(request)
-        
-        # Rate limit by IP
-        ip_key = f"login_ratelimit_ip_{ip}"
-        ip_limit = getattr(settings, 'LOGIN_RATELIMIT_IP', 5)
-        ip_period = getattr(settings, 'LOGIN_RATELIMIT_IP_PERIOD', 60)  # 1 minute
-        
-        # Check if IP is rate limited
-        ip_count = cache.get(ip_key, 0)
-        if ip_count >= ip_limit:
-            logger.warning(f"Login rate limit exceeded for IP: {ip}")
-            return Response(
-                {"error": "Too many login attempts. Please try again later.", "code": "rate_limit_exceeded"},
-                status=status.HTTP_429_TOO_MANY_REQUESTS
-            )
-        
-        # If email is provided, also rate limit by email
-        email = None
-        if request.method == 'POST' and hasattr(request, 'data') and 'email' in request.data:
-            email = request.data['email']
-            email_hash = hashlib.sha256(email.encode()).hexdigest()
-            email_key = f"login_ratelimit_email_{email_hash}"
-            email_limit = getattr(settings, 'LOGIN_RATELIMIT_EMAIL', 5)
-            email_period = getattr(settings, 'LOGIN_RATELIMIT_EMAIL_PERIOD', 300)  # 5 minutes
-            
-            # Check if email is rate limited
-            email_count = cache.get(email_key, 0)
-            if email_count >= email_limit:
-                logger.warning(f"Login rate limit exceeded for email: {email}")
-                # Return the same error to prevent user enumeration
-                return Response(
-                    {"error": "Too many login attempts. Please try again later.", "code": "rate_limit_exceeded"},
-                    status=status.HTTP_429_TOO_MANY_REQUESTS
-                )
-            
-            # Increment email count
-            if email_count == 0:
-                cache.set(email_key, 1, email_period)
-            else:
-                cache.incr(email_key)
-        
-        # Increment IP count
-        if ip_count == 0:
-            cache.set(ip_key, 1, ip_period)
-        else:
-            cache.incr(ip_key)
-        
-        # Process the request
-        return view_func(request, *args, **kwargs)
-    
-    return wrapped_view
-
-def register_ratelimit(view_func):
-    """Rate limit for registration - 3 per hour per IP"""
-    key_func = lambda request: f"register_ratelimit_{get_client_ip(request)}"
-    return rate_limit(key_func, 
-                     getattr(settings, 'REGISTER_RATELIMIT', 3),
-                     getattr(settings, 'REGISTER_RATELIMIT_PERIOD', 3600))(view_func)
-
-def password_reset_ratelimit(view_func):
-    """Rate limit for password reset requests - 3 per hour per IP"""
-    @functools.wraps(view_func)
-    def wrapped_view(request, *args, **kwargs):
-        ip = get_client_ip(request)
-        
-        # Rate limit by IP
-        ip_key = f"password_reset_ratelimit_ip_{ip}"
-        ip_limit = getattr(settings, 'PASSWORD_RESET_RATELIMIT_IP', 3)
-        ip_period = getattr(settings, 'PASSWORD_RESET_RATELIMIT_IP_PERIOD', 3600)  # 1 hour
-        
-        # Check if IP is rate limited
-        ip_count = cache.get(ip_key, 0)
-        if ip_count >= ip_limit:
-            logger.warning(f"Password reset rate limit exceeded for IP: {ip}")
-            return Response(
-                {"error": "Too many password reset attempts. Please try again later.", "code": "rate_limit_exceeded"},
-                status=status.HTTP_429_TOO_MANY_REQUESTS
-            )
-        
-        # If email is provided, also rate limit by email
-        email = None
-        if request.method == 'POST' and hasattr(request, 'data') and 'email' in request.data:
-            email = request.data['email']
-            email_hash = hashlib.sha256(email.encode()).hexdigest()
-            email_key = f"password_reset_ratelimit_email_{email_hash}"
-            email_limit = getattr(settings, 'PASSWORD_RESET_RATELIMIT_EMAIL', 3)
-            email_period = getattr(settings, 'PASSWORD_RESET_RATELIMIT_EMAIL_PERIOD', 86400)  # 24 hours
-            
-            # Check if email is rate limited
-            email_count = cache.get(email_key, 0)
-            if email_count >= email_limit:
-                logger.warning(f"Password reset rate limit exceeded for email: {email}")
-                # Still return success to prevent user enumeration
-                return Response(
-                    {"message": "If your email is registered, you will receive password reset instructions."},
-                    status=status.HTTP_200_OK
-                )
-            
-            # Increment email count
-            if email_count == 0:
-                cache.set(email_key, 1, email_period)
-            else:
-                cache.incr(email_key)
-        
-        # Increment IP count
-        if ip_count == 0:
-            cache.set(ip_key, 1, ip_period)
-        else:
-            cache.incr(ip_key)
-        
-        # Process the request
-        return view_func(request, *args, **kwargs)
-    
-    return wrapped_view
-
-def api_key_ratelimit(view_func):
-    """Rate limit for API key generation - 3 per day per user"""
-    @functools.wraps(view_func)
-    def wrapped_view(request, *args, **kwargs):
-        if request.user and request.user.is_authenticated:
-            key = f"api_key_ratelimit_user_{request.user.id}"
-            limit = getattr(settings, 'API_KEY_RATELIMIT', 3)
-            period = getattr(settings, 'API_KEY_RATELIMIT_PERIOD', 86400)  # 24 hours
-            
-            # Check if user is rate limited
-            count = cache.get(key, 0)
-            if count >= limit:
-                logger.warning(f"API key generation rate limit exceeded for user: {request.user.id}")
-                return Response(
-                    {"error": "API key generation limit exceeded. Please try again tomorrow.", "code": "rate_limit_exceeded"},
-                    status=status.HTTP_429_TOO_MANY_REQUESTS
-                )
-            
-            # Increment count
-            if count == 0:
-                cache.set(key, 1, period)
-            else:
-                cache.incr(key)
-        
-        # Process the request
-        return view_func(request, *args, **kwargs)
-    
-    return wrapped_view
-
-def ratelimit_handler(view_func):
-    """Handler for rate limited requests that returns a proper API response"""
-    @functools.wraps(view_func)
-    def wrapped_view(self, request, *args, **kwargs):
-        try:
-            return view_func(self, request, *args, **kwargs)
-        except Exception as e:
-            if hasattr(e, 'status_code') and e.status_code == 429:
-                # Log the rate limit violation
-                log_data = {
-                    'path': request.path,
-                    'method': request.method,
-                    'user': request.user.email if request.user.is_authenticated else 'anonymous',
-                    'ip': get_client_ip(request),
-                }
-                logger.warning(f"Rate limit exceeded: {log_data}")
-                
-                return Response(
-                    {"error": "Rate limit exceeded. Please try again later.", "code": "rate_limit_exceeded"},
-                    status=status.HTTP_429_TOO_MANY_REQUESTS
-                )
-            raise
-    return wrapped_view
-
-def sensitive_post_parameters(*parameters):
+def login_rate_limit(view_func):
     """
-    Decorator that marks parameters as sensitive in logs and error reports.
+    Specific rate limiter for login attempts.
+    Stricter limits: 5 attempts per minute per IP, 10 attempts per hour per username
+    """
+    @rate_limit('login', limit=5, period=60, scope='ip')
+    @functools.wraps(view_func)
+    def wrapped_view(request, *args, **kwargs):
+        # Apply username-specific rate limiting for POSTs (likely login attempts)
+        if request.method == 'POST' and hasattr(request, 'data'):
+            username = request.data.get('username') or request.data.get('email')
+            if username:
+                # Hash the username to avoid storing PII in cache keys
+                username_hash = hashlib.sha256(username.lower().encode()).hexdigest()
+                username_key = f"ratelimit:login:username_{username_hash}"
+                
+                # Get current username attempt count
+                username_data = cache.get(username_key, {'count': 0, 'reset': time.time() + 3600})
+                
+                # Reset if period expired
+                if time.time() > username_data['reset']:
+                    username_data = {'count': 0, 'reset': time.time() + 3600}
+                
+                username_data['count'] += 1
+                
+                # Store back in cache
+                ttl = int(username_data['reset'] - time.time())
+                cache.set(username_key, username_data, ttl)
+                
+                # Check username rate limit - 10 attempts per hour
+                if username_data['count'] > 10:
+                    # Log username rate limit breach
+                    logger.warning(
+                        f"Username rate limit exceeded for hashed username: {username_hash}",
+                        extra={
+                            'username_hash': username_hash,
+                            'count': username_data['count'],
+                            'client_ip': _get_client_ip(request),
+                        }
+                    )
+                    
+                    # Calculate retry-after time
+                    retry_after = int(username_data['reset'] - time.time())
+                    
+                    # Raise throttled exception
+                    raise Throttled(
+                        detail=f"Too many login attempts for this account. Try again in {retry_after} seconds.",
+                        code='throttled'
+                    )
+        
+        return view_func(request, *args, **kwargs)
+    
+    return wrapped_view
+
+def reset_password_rate_limit(view_func):
+    """
+    Rate limiter specifically for password reset requests.
+    Limits: 3 attempts per hour per email, 10 attempts per day per IP
+    """
+    @rate_limit('password_reset', limit=3, period=3600, scope='param')
+    @rate_limit('password_reset_ip', limit=10, period=86400, scope='ip')
+    @functools.wraps(view_func)
+    def wrapped_view(request, *args, **kwargs):
+        # Extract email from request for per-email rate limiting
+        if request.method == 'POST' and hasattr(request, 'data'):
+            email = request.data.get('email')
+            if email:
+                # Hash the email to avoid storing PII in cache keys
+                kwargs['param_name'] = hashlib.sha256(email.lower().encode()).hexdigest()
+        
+        return view_func(request, *args, **kwargs)
+    
+    return wrapped_view
+
+def registration_rate_limit(view_func):
+    """
+    Rate limiter for registration attempts to prevent spam account creation.
+    Limits: 3 registrations per day per IP, 1 registration attempt per email per day
+    """
+    @rate_limit('registration', limit=3, period=86400, scope='ip')
+    @functools.wraps(view_func)
+    def wrapped_view(request, *args, **kwargs):
+        # Apply email-specific rate limiting for POSTs
+        if request.method == 'POST' and hasattr(request, 'data'):
+            email = request.data.get('email')
+            if email:
+                # Hash the email to avoid storing PII in cache keys
+                email_hash = hashlib.sha256(email.lower().encode()).hexdigest()
+                email_key = f"ratelimit:registration:email_{email_hash}"
+                
+                # Get current email attempt count - 1 per day
+                email_data = cache.get(email_key, {'count': 0, 'reset': time.time() + 86400})
+                
+                # Reset if period expired
+                if time.time() > email_data['reset']:
+                    email_data = {'count': 0, 'reset': time.time() + 86400}
+                
+                email_data['count'] += 1
+                
+                # Store back in cache
+                ttl = int(email_data['reset'] - time.time())
+                cache.set(email_key, email_data, ttl)
+                
+                # Check email rate limit - 1 attempt per email per day
+                if email_data['count'] > 1:
+                    logger.warning(
+                        f"Registration rate limit exceeded for email hash: {email_hash}",
+                        extra={
+                            'email_hash': email_hash,
+                            'client_ip': _get_client_ip(request),
+                        }
+                    )
+                    
+                    raise Throttled(
+                        detail="An account with this email was recently registered or attempted. Please try again tomorrow.",
+                        code='throttled'
+                    )
+        
+        return view_func(request, *args, **kwargs)
+    
+    return wrapped_view
+
+def api_key_rate_limit(limit=100, period=60):
+    """
+    Rate limiter for API key usage.
+    Default: 100 requests per minute per API key
     """
     def decorator(view_func):
         @functools.wraps(view_func)
         def wrapped_view(request, *args, **kwargs):
-            # Process the request
-            return view_func(request, *args, **kwargs)
+            # Extract API key from request
+            api_key = request.META.get('HTTP_X_API_KEY') or request.GET.get('api_key')
+            
+            if not api_key:
+                # No API key provided, fallback to IP-based limiting
+                return rate_limit('api', limit=10, period=60, scope='ip')(view_func)(request, *args, **kwargs)
+            
+            # Hash the API key for the cache key
+            key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
+            key = f"ratelimit:api:key_{key_hash}"
+            
+            # Get current count from cache
+            cache_data = cache.get(key, {'count': 0, 'reset': time.time() + period})
+            
+            # Reset if period expired
+            if time.time() > cache_data['reset']:
+                cache_data = {'count': 0, 'reset': time.time() + period}
+            
+            cache_data['count'] += 1
+            
+            # Store back in cache
+            ttl = int(cache_data['reset'] - time.time())
+            cache.set(key, cache_data, ttl)
+            
+            # Check API key rate limit
+            if cache_data['count'] > limit:
+                logger.warning(
+                    f"API key rate limit exceeded for key hash: {key_hash}",
+                    extra={
+                        'key_hash': key_hash,
+                        'count': cache_data['count'],
+                        'client_ip': _get_client_ip(request),
+                    }
+                )
+                
+                # Add rate limit headers
+                headers = {
+                    'X-RateLimit-Limit': str(limit),
+                    'X-RateLimit-Remaining': '0',
+                    'X-RateLimit-Reset': str(int(cache_data['reset'])),
+                }
+                
+                # Calculate retry-after time
+                retry_after = int(cache_data['reset'] - time.time())
+                
+                # Raise throttled exception with headers
+                throttled = Throttled(
+                    detail=f"API rate limit exceeded. Try again in {retry_after} seconds.",
+                    code='throttled'
+                )
+                throttled.headers = headers
+                raise throttled
+            
+            # Add rate limit headers to response
+            response = view_func(request, *args, **kwargs)
+            
+            # Add rate limit headers
+            response['X-RateLimit-Limit'] = str(limit)
+            response['X-RateLimit-Remaining'] = str(max(0, limit - cache_data['count']))
+            response['X-RateLimit-Reset'] = str(int(cache_data['reset']))
+            
+            return response
         
-        # Mark the view as having sensitive parameters
-        wrapped_view.sensitive_post_parameters = parameters
         return wrapped_view
     
     return decorator
+
+def _get_client_ip(request):
+    """Extract client IP from request"""
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        ip = x_forwarded_for.split(',')[0]
+    else:
+        ip = request.META.get('REMOTE_ADDR')
+    return ip
