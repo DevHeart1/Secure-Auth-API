@@ -47,9 +47,6 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'corsheaders.middleware.CorsMiddleware',
-    'authentication.middleware.SecurityHeadersMiddleware',
-    'authentication.middleware.SecurityMonitoringMiddleware',
-    'authentication.middleware.SecurityLoggingMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -204,29 +201,3 @@ X_FRAME_OPTIONS = 'DENY'
 SECURE_HSTS_SECONDS = 31536000  # 1 year
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 SECURE_HSTS_PRELOAD = True
-
-# Content Security Policy settings
-CSP_NONCE_LENGTH = 16
-CSP_REPORT_ONLY = os.getenv('CSP_REPORT_ONLY', 'False') == 'True'
-CSP_REPORT_URI = os.getenv('CSP_REPORT_URI', None)
-XSS_PROTECTION = '1; mode=block'
-CONTENT_TYPE_OPTIONS = 'nosniff'
-REFERRER_POLICY = 'strict-origin-when-cross-origin'
-PERMISSIONS_POLICY = (
-    'accelerometer=(), camera=(), geolocation=(), gyroscope=(), '
-    'magnetometer=(), microphone=(), payment=(), usb=()'
-)
-
-# Rate limiting settings
-LOGIN_RATELIMIT_IP = 5  # 5 attempts per minute per IP
-LOGIN_RATELIMIT_IP_PERIOD = 60  # 1 minute
-LOGIN_RATELIMIT_EMAIL = 5  # 5 attempts per 5 minutes per email
-LOGIN_RATELIMIT_EMAIL_PERIOD = 300  # 5 minutes
-REGISTER_RATELIMIT = 3  # 3 registrations per hour per IP
-REGISTER_RATELIMIT_PERIOD = 3600  # 1 hour
-PASSWORD_RESET_RATELIMIT_IP = 3  # 3 password reset requests per hour per IP
-PASSWORD_RESET_RATELIMIT_IP_PERIOD = 3600  # 1 hour
-PASSWORD_RESET_RATELIMIT_EMAIL = 3  # 3 password reset requests per day per email
-PASSWORD_RESET_RATELIMIT_EMAIL_PERIOD = 86400  # 24 hours
-API_KEY_RATELIMIT = 3  # 3 API key generations per day per user
-API_KEY_RATELIMIT_PERIOD = 86400  # 24 hours
