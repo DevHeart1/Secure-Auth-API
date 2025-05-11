@@ -568,20 +568,217 @@ async function refreshToken() {
 
 ## 10. Deployment Considerations
 
-*   **Environment Variables:** Never hardcode secrets. Use environment variables or a secrets management system.
-*   **HTTPS:** Configure a reverse proxy (like Nginx or Caddy) to handle HTTPS termination.
-*   **Database:** Use a managed database service for production. Ensure backups are configured.
-*   **WSGI Server:** Use a production-grade WSGI server (like Gunicorn or uWSGI) behind the reverse proxy.
-*   **Static Files:** Configure the reverse proxy to serve static files efficiently.
-*   **Logging:** Implement structured logging and aggregate logs for monitoring and debugging.
-*   **Monitoring:** Set up monitoring for application performance, error rates, and system resources.
-*   **Security Hardening:** Apply OS and server hardening techniques. Keep systems patched.
+### 10.1. Production Infrastructure
+
+*   **Environment Variables:** 
+    * Never hardcode secrets. Use environment variables or a secrets management system.
+    * Consider using a tool like HashiCorp Vault or AWS Secrets Manager for sensitive credentials.
+    * Rotate secrets regularly (especially JWT signing keys).
+
+*   **HTTPS:** 
+    * Configure Nginx as a reverse proxy to handle HTTPS termination.
+    * Use Let's Encrypt for free TLS certificates or a commercial provider for extended validation certificates.
+    * Implement HSTS headers with a reasonable max-age.
+    * Configure modern TLS protocols (TLS 1.2+) and cipher suites.
+
+*   **Database:** 
+    * Use a managed PostgreSQL service for production (AWS RDS, Google Cloud SQL, etc.).
+    * Implement automated backups with point-in-time recovery.
+    * Configure proper connection pooling.
+    * Implement a database migration strategy for zero-downtime upgrades.
+
+*   **WSGI Server:** 
+    * Use Gunicorn as the WSGI server behind Nginx.
+    * Configure appropriate worker processes (typically 2-4× CPU cores).
+    * Set reasonable timeouts for requests.
+
+*   **Static Files:** 
+    * Configure Nginx to serve static files directly.
+    * Consider using a CDN for static assets in high-traffic scenarios.
+    * Implement proper cache headers.
+
+*   **Logging and Monitoring:**
+    * Implement structured logging (JSON format).
+    * Aggregate logs with a system like ELK Stack (Elasticsearch, Logstash, Kibana) or a managed service.
+    * Set up real-time alerts for authentication failures, rate limit breaches, etc.
+    * Monitor system metrics (CPU, memory, disk) and application metrics (request rates, error rates, response times).
+    * Use a tool like Prometheus/Grafana or a managed service for monitoring.
+
+*   **Security Hardening:**
+    * Keep all system packages and dependencies updated.
+    * Run security scanners and audits regularly.
+    * Implement a Web Application Firewall (WAF) for additional protection.
+    * Configure proper network security groups and firewall rules.
+    * Consider implementing IP-based access control for admin endpoints.
+
+### 10.2. Docker Production Deployment
+
+This project includes Docker configuration for production deployment. Below is an example of deploying with Docker Compose:
+
+```bash
+# 1. Clone the repository on your production server
+git clone https://github.com/DevHeart1/Secure-Auth-API.git
+cd Secure-Auth-API
+
+# 2. Create and configure environment variables
+cp Auth_backend/.env.example Auth_backend/.env
+# Edit .env with production values (use a secure editor)
+nano Auth_backend/.env
+
+# 3. Start the production services
+cd Auth_backend
+docker-compose -f docker-compose.yml up -d
+
+# 4. Verify the services are running
+docker-compose ps
+
+# 5. Set up automated backups for the database
+# (Example cron job - adjust as needed)
+# 0 2 * * * docker exec secure-auth-postgres pg_dump -U postgres secure_auth > /backup/secure_auth_$(date +\%Y\%m\%d).sql
+```
+
+### 10.3. High-Availability Setup
+
+For mission-critical deployments, consider:
+
+* Multiple application instances behind a load balancer
+* Database replication and failover capabilities
+* Redundancy across availability zones
+* Automated scaling policies based on load
+* Regular disaster recovery testing
+
+### 10.4. CI/CD Pipeline Integration
+
+Integrate with a CI/CD pipeline (GitHub Actions, Jenkins, etc.) to automate:
+
+* Running tests
+* Security scanning
+* Building Docker images
+* Deploying to staging
+* Promoting to production
+* Database migrations
 
 ## 11. Contributing
 
-*(Placeholder: Add guidelines here if the project becomes open source, e.g., code style, pull request process, issue reporting.)*
+### 11.1. Code of Conduct
+
+By participating in this project, you agree to maintain a respectful and inclusive environment for everyone. We expect all contributors to:
+
+- Use welcoming and inclusive language
+- Be respectful of differing viewpoints and experiences
+- Accept constructive criticism gracefully
+- Focus on what's best for the community and project
+
+### 11.2. How to Contribute
+
+1. **Fork the Repository**
+   - Create your own fork of the project on GitHub
+
+2. **Clone your Fork**
+   ```bash
+   git clone https://github.com/your-username/Secure-Auth-API.git
+   cd Secure-Auth-API
+   ```
+
+3. **Set up the Development Environment**
+   - Follow the installation steps in Section 7
+   - Make sure all tests pass before making any changes
+
+4. **Create a Feature Branch**
+   ```bash
+   git checkout -b feature/your-feature-name
+   ```
+
+5. **Make Your Changes**
+   - Write clean, readable code
+   - Follow the existing code style and patterns
+   - Add or update tests as necessary
+
+### 11.3. Code Standards
+
+- **Python Code Style:**
+  - Follow PEP 8 guidelines
+  - Use meaningful variable and function names
+  - Write docstrings for all public modules, functions, classes, and methods
+
+- **Django Best Practices:**
+  - Proper use of Django models, views, serializers
+  - Maintain separation of concerns
+  - Test all critical code paths
+
+### 11.4. Testing Requirements
+
+- Add tests for all new features or bug fixes
+- Ensure all tests pass before submitting your changes:
+  ```bash
+  cd Auth_backend
+  python manage.py test
+  ```
+- Run linting tools:
+  ```bash
+  flake8 .
+  black .
+  isort .
+  ```
+
+### 11.5. Pull Request Process
+
+1. **Update Documentation:**
+   - Add or update documentation (including this documentation file) for any changes to API endpoints, configuration options, or functionality
+
+2. **Submit a Pull Request:**
+   - Submit your pull request with a clear title and description
+   - Reference any related issues using GitHub's issue linking syntax
+   - Make sure all CI tests pass
+
+3. **Code Review:**
+   - Address any feedback from maintainers promptly
+   - Be open to suggestions for improvement
+
+4. **Merge:**
+   - Once approved, a maintainer will merge your contribution
+
+### 11.6. Reporting Issues
+
+When reporting issues, please provide:
+
+- A clear and descriptive title
+- Detailed steps to reproduce the bug
+- Expected behavior and what actually happens
+- Any relevant logs, error messages, or screenshots
+- System information (OS, browser, etc.) if relevant
+
+### 11.7. Security Vulnerabilities
+
+If you discover a security vulnerability, please do NOT open a public issue. Email security@example.com with details, and we'll address it promptly.
 
 ## 12. License
 
-*(Placeholder: Specify the project's license, e.g., MIT, Apache 2.0.)*
+This project is licensed under the MIT License.
+
+```
+MIT License
+
+Copyright (c) 2025 Secure-Auth-API Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+For third-party components and libraries used in this project, their respective licenses apply.
 
